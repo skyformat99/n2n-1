@@ -26,13 +26,14 @@ static n2n_sn_t sss_node;
 /** Load the list of allowed communities. Existing/previous ones will be removed
  *
  */
-static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
+static int load_allowed_sn_community_rule(n2n_sn_t *sss, char *path) {
   char buffer[4096], *line;
   FILE *fd = fopen(path, "r");
-  struct sn_community *s, *tmp;
+  struct sn_community *s, *tmp;  //full text match
+  struct sn_community_filter *s_filter, *tmp_filter;  //regex match
   uint32_t num_communities = 0;
 
-  if(fd == NULL) {
+  if (fd == NULL)  {
     traceEvent(TRACE_WARNING, "File %s not found", path);
     return -1;
   }
@@ -40,53 +41,77 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
   HASH_ITER(hh, sss->communities, s, tmp) {
     HASH_DEL(sss->communities, s);
     if (NULL != s->header_encryption_ctx)
-      free (s->header_encryption_ctx);
+      free(s->header_encryption_ctx);
     free(s);
   }
+  HASH_ITER(hh, sss->communities_filters, s_filter, tmp_filter) {
+    HASH_DEL(sss->communities, s_filter);
+    free(s_filter);
+  }
 
-  while((line = fgets(buffer, sizeof(buffer), fd)) != NULL) {
+  while ((line = fgets(buffer, sizeof(buffer), fd)) != NULL) {
     int len = strlen(line);
 
-    if((len < 2) || line[0] == '#')
+    if ((len < 2) || line[0] == '#')
       continue;
 
     len--;
-    while(len > 0) {
-      if((line[len] == '\n') || (line[len] == '\r')) {
-	line[len] = '\0';
-	len--;
-      } else
-	break;
+    while (len > 0) {
+      if ((line[len] == '\n') || (line[len] == '\r')) {
+        line[len] = '\0';
+        len--;
+      }
+      else
+        break;
     }
 
-    s = (struct sn_community*)calloc(1,sizeof(struct sn_community));
+    // check type of rule text
+    if(NULL == strpbrk(line, ".^$*+?[]\\")) {
+        // full text match the community name, allow -H encryption headers
+        s = (struct sn_community *)calloc(1, sizeof(struct sn_community));
 
-    if(s != NULL) {
-      strncpy((char*)s->community, line, N2N_COMMUNITY_SIZE-1);
-      s->community[N2N_COMMUNITY_SIZE-1] = '\0';
-      /* we do not know if header encryption is used in this community,
-       * first packet will show. just in case, setup the key.           */
-      s->header_encryption = HEADER_ENCRYPTION_UNKNOWN;
-      packet_header_setup_key (s->community, &(s->header_encryption_ctx), &(s->header_iv_ctx));
-      HASH_ADD_STR(sss->communities, community, s);
+        if (s != NULL)
+        {
+          strncpy((char *)s->community, line, N2N_COMMUNITY_SIZE - 1);
+          s->community[N2N_COMMUNITY_SIZE - 1] = '\0';
+          /* we do not know if header encryption is used in this community,
+        * first packet will show. just in case, setup the key.           */
+          s->header_encryption = HEADER_ENCRYPTION_UNKNOWN;
+          packet_header_setup_key(s->community, &(s->header_encryption_ctx), &(s->header_iv_ctx));
+          HASH_ADD_STR(sss->communities, community, s);
 
-      num_communities++;
-      traceEvent(TRACE_INFO, "Added allowed community '%s' [total: %u]",
-		 (char*)s->community, num_communities);
-    }
+          num_communities++;
+          traceEvent(TRACE_INFO, "Added allowed full text community '%s' [total: %u]",
+                    (char *)s->community, num_communities);
+        }
+      }
+      else {
+        // if it contains typical characters,it is treated as regular expression
+        s_filter = (struct sn_community_filter *)calloc(1, sizeof(struct sn_community_filter));
+
+        if (s_filter != NULL) {
+          strncpy((char *)s_filter->community_rule, line, N2N_COMMUNITY_SIZE - 1);
+          s_filter->community_rule[N2N_COMMUNITY_SIZE - 1] = '\0';
+          HASH_ADD_STR(sss->communities_filters, community_rule, s_filter);
+
+          num_communities++;
+          traceEvent(TRACE_INFO, "Added regular expression for allowed communities '%s' [total: %u]",
+                     (char *)s_filter->community_rule, num_communities);
+        }
+      }
   }
 
   fclose(fd);
 
-  traceEvent(TRACE_NORMAL, "Loaded %u communities from %s",
-	     num_communities, path);
+  traceEvent(TRACE_NORMAL, "Loaded %u communities regex from %s", num_communities, path);
 
   /* No new communities will be allowed */
-  sss->lock_communities = 1;
+  if (num_communities > 0) {
+    sss->lock_communities = 1;
+  }
 
-  return(0);
+  return (0);
 }
-
 
 /* *************************************************** */
 
@@ -152,8 +177,8 @@ static int setOption(int optkey, char *_optarg, n2n_sn_t *sss) {
     break;
 #endif
 
-  case 'c': /* community file */
-    load_allowed_sn_community(sss, _optarg);
+  case 'c': /* community filter file */
+    load_allowed_sn_community_rule(sss, _optarg);
     break;
 
   case 'f': /* foreground */
